@@ -35,15 +35,10 @@ Cài đặt thư viện Python:
     pip install streamlit pypdf pdf2image python-pptx Pillow pandas openpyxl anthropic openai requests
 """
 """
-====================================================================================
- HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN V5.1 FINAL — Interactive Workflow + Drag & Drop Canvas + AI Data Extraction
-====================================================================================
-"""
 """
 ====================================================================================
  HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN V5.2 FINAL — Interactive Workflow + Gemini Pro Vision + Error Handling
+ PHIÊN BẢN V5.3 CLOUD-SAFE — Chống Segfault + Nâng cấp Google GenAI SDK mới nhất
 ====================================================================================
 """
 
@@ -51,34 +46,34 @@ import io
 import json
 import math
 import os
-import platform
 import random
 import re
-import fitz
 import unicodedata
+import tempfile
+import base64
 from dataclasses import dataclass, field
 from typing import Optional
-import base64
+
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 from pypdf import PdfReader
-import fitz
+import pypdfium2 as pdfium
 from pptx import Presentation
-from pptx.util import Inches, Pt, Emu
+from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 
-# Tích hợp Google Gemini
+# SDK mới của Google Gemini (Năm 2026)
 try:
-    import google.generativeai as genai
+    from google import genai
 except ImportError:
     genai = None
 
 # ====================================================================================
-# 0. KHỞI TẠO CUSTOM COMPONENT GIAO TIẾP 2 CHIỀU (STREAMLIT <-> JS)
+# 0. KHỞI TẠO CUSTOM COMPONENT GIAO TIẾP 2 CHIỀU (GHI VÀO THƯ MỤC TẠM /tmp ĐỂ CHỐNG CRASH)
 # ====================================================================================
-COMPONENT_DIR = os.path.join(os.path.dirname(__file__), "map_component")
+COMPONENT_DIR = os.path.join(tempfile.gettempdir(), "map_component")
 os.makedirs(COMPONENT_DIR, exist_ok=True)
 
 COMPONENT_HTML = """
@@ -194,7 +189,7 @@ interactive_map_component = components.declare_component("interactive_map", path
 # ====================================================================================
 # 1. CẤU HÌNH MẶC ĐỊNH
 # ====================================================================================
-AI_MODEL_DEFAULT = "gemini-1.5-pro" # Mặc định chuyển sang dùng Gemini Pro
+AI_MODEL_DEFAULT = "gemini-1.5-pro"
 GRID_METERS = 6.0
 STOPWORDS_VI = {"và", "cho", "của", "tại"}
 SLIDE_TYPES = ["Booth Location", "Perspective View", "Booth Dimensions"]
@@ -271,16 +266,14 @@ def regex_extract_quantities_generic(text: str, labels: list) -> dict:
 
 
 # ====================================================================================
-# 3. AI PROVIDER (TÍCH HỢP GOOGLE GEMINI PRO)
+# 3. AI PROVIDER (GOOGLE GENAI SDK 2026)
 # ====================================================================================
 class AIProvider:
     def __init__(self, api_key: str, model: str):
         if genai is None:
-            raise RuntimeError("Chưa cài thư viện. Vui lòng chạy: pip install google-generativeai")
-        
-        # Cấu hình API Key cho Google Gemini
-        genai.configure(api_key=api_key)
-        self.model = genai.GenerativeModel(model)
+            raise RuntimeError("Chưa cài thư viện. Vui lòng thêm google-genai vào requirements.txt")
+        self.client = genai.Client(api_key=api_key)
+        self.model = model
 
     def classify_slide_image(self, image: Image.Image) -> str:
         system_prompt = (
@@ -290,19 +283,23 @@ class AIProvider:
             "- Booth Dimensions (BẮT BUỘC là mặt bằng 2D nhìn thẳng góc 90 độ từ trên xuống - Top view. Thể hiện không gian phẳng 2D, thường có đường kích thước hoặc lưới. TUYỆT ĐỐI KHÔNG CHỌN nhãn này nếu hình ảnh có góc chéo 3D).\n"
             "- Other."
         )
-        
-        # Gemini nhận diện trực tiếp ảnh PIL rất tiện lợi
-        response = self.model.generate_content([system_prompt, image])
-        return response.text.strip()
+        try:
+            response = self.client.models.generate_content(
+                model=self.model,
+                contents=[system_prompt, image]
+            )
+            return response.text.strip()
+        except Exception as e:
+            return "Other"
 
 
 # ====================================================================================
-# 4. RUN AI PROCESSING (QUY TRÌNH BÓC TÁCH & PHÂN LOẠI ẢNH)
+# 4. RUN AI PROCESSING (PYPDFIUM2 THAY THẾ CHO PYMUPDF CHỐNG CRASH)
 # ====================================================================================
 def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvider) -> PipelineResult:
     result = PipelineResult()
     
-    # 1. Round 1: Đọc & Bóc tách file Báo giá (Quotation)
+    # 1. Bóc tách báo giá
     quotation_text = read_quotation_as_text(quotation_file.read(), quotation_file.name)
     labels = [str(r.get("Tên thiết bị", "")).strip() for r in table_rows if str(r.get("Tên thiết bị", "")).strip()]
     regex_found = regex_extract_quantities_generic(quotation_text, labels) if quotation_text else {}
@@ -318,22 +315,29 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
             power=row["Công suất"], quantity=int(synced_qty)
         ))
     
-    # 2. Xử lý PDF lấy ảnh (Round 2)
-    doc = fitz.open(stream=review_file.read(), filetype="pdf")
+    # 2. Xử lý PDF bằng pypdfium2 (Rất an toàn trên Cloud)
+    pdf = pdfium.PdfDocument(review_file)
     classified = {t: None for t in SLIDE_TYPES}
-    for page in doc:
-        img = Image.open(io.BytesIO(page.get_pixmap(dpi=150).tobytes("png")))
+    
+    for i in range(len(pdf)):
+        page = pdf[i]
+        bitmap = page.render(scale=2.0)  # Scale=2.0 cho ảnh nét
+        img = bitmap.to_pil()
+        page.close()
+        
         label = ai.classify_slide_image(img)
         for t in SLIDE_TYPES:
             if t in label and classified[t] is None:
                 classified[t] = img
                 break
+                
+    pdf.close()
     
     result.booth_location_img = classified["Booth Location"]
     result.perspective_img = classified["Perspective View"]
     result.dimensions_img = classified["Booth Dimensions"]
     
-    # 3. Rải đều toạ độ để người dùng kéo thả trên HTML Canvas
+    # 3. Rải đều toạ độ
     coords = {}
     for it in result.equipment:
         coords[it.key] = [[round(random.uniform(1.0, 5.0), 2), round(random.uniform(1.0, 5.0), 2)] for _ in range(it.quantity)]
@@ -343,7 +347,7 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
 
 
 # ====================================================================================
-# 5. HÀM TẠO PPTX (SỬ DỤNG HÌNH ẢNH BASE64 TỪ COMPONENT JS)
+# 5. HÀM TẠO PPTX
 # ====================================================================================
 def export_final_pptx(result: PipelineResult, final_b64_image: str, final_counts: dict) -> bytes:
     prs = Presentation()
@@ -359,19 +363,19 @@ def export_final_pptx(result: PipelineResult, final_b64_image: str, final_counts
         img_obj.convert("RGB").save(buf, format="PNG")
         slide.shapes.add_picture(buf, left, top, width=pic_w, height=pic_h)
 
-    # Slide 1, 2, 3 giữ nguyên bản gốc sạch
+    # Slide 1, 2, 3
     for img in [result.booth_location_img, result.perspective_img, result.dimensions_img]:
         s = prs.slides.add_slide(blank)
         if img: add_img(s, img)
 
-    # Slide 4: CHỤP TỪ MÀN HÌNH TƯƠNG TÁC HTML
+    # Slide 4:
     s4 = prs.slides.add_slide(blank)
     if final_b64_image:
         header, encoded = final_b64_image.split(",", 1)
         final_img = Image.open(io.BytesIO(base64.b64decode(encoded)))
         add_img(s4, final_img)
 
-        # Tạo bảng Legend mới dựa trên tổng lượng thực tế (final_counts)
+        # Legend
         rows = []
         for eq in result.equipment:
             qty = final_counts.get(eq.key, 0)
@@ -395,55 +399,50 @@ def export_final_pptx(result: PipelineResult, final_b64_image: str, final_counts
 
 
 # ====================================================================================
-# 6. GIAO DIỆN CHÍNH (WORKFLOW 2 BƯỚC)
+# 6. GIAO DIỆN CHÍNH
 # ====================================================================================
 def main():
-    st.set_page_config(page_title="MEP Layout Auto V5.2", page_icon="⚡", layout="wide")
+    st.set_page_config(page_title="MEP Layout Auto V5.3", page_icon="⚡", layout="wide")
     
     if "step" not in st.session_state:
         st.session_state.step = 1
         st.session_state.result = None
         st.session_state.equipment_table = pd.DataFrame(DEFAULT_EQUIPMENT_CONFIG)
 
-    st.title("⚡ MEP Layout Auto-Generator V5.2 — Tương Tác Kéo Thả (Gemini Pro)")
+    st.title("⚡ MEP Layout Auto-Generator V5.3 — Cloud Safe (Gemini Pro)")
     
-    # ------------------ GIAI ĐOẠN 1: NHẬP DỮ LIỆU & AI XỬ LÝ ------------------
     if st.session_state.step == 1:
         st.info("Bước 1: Cấu hình bảng Legend và Upload file thiết kế (Quotation + 3D Review).")
         c1, c2 = st.columns([1, 1])
         with c1:
-            edited_df = st.data_editor(st.session_state.equipment_table, num_rows="dynamic", use_container_width=True)
+            # Đã fix lỗi warning use_container_width
+            edited_df = st.data_editor(st.session_state.equipment_table, num_rows="dynamic", width="stretch")
             st.session_state.equipment_table = edited_df
         with c2:
             st.sidebar.text_input("Google Gemini API Key (bắt buộc)", key="api_key", type="password")
-            st.sidebar.selectbox("Model", ["gemini-1.5-pro", "gemini-1.5-flash"], key="model_choice")
+            st.sidebar.selectbox("Model", ["gemini-1.5-pro", "gemini-2.5-flash"], key="model_choice")
             
             q_file = st.file_uploader("File Báo Giá (PDF/Excel)")
             r_file = st.file_uploader("File 3D Review (PDF)")
             
-            if st.button("🚀 Xử Lý AI Khởi Tạo Bản Đồ", type="primary", use_container_width=True):
+            if st.button("🚀 Xử Lý AI Khởi Tạo Bản Đồ", type="primary"):
                 if not st.session_state.api_key: 
                     st.error("⚠️ Vui lòng nhập API Key của Google Gemini ở Sidebar!")
                 elif not q_file or not r_file: 
                     st.error("⚠️ Vui lòng upload đầy đủ 2 file!")
                 else:
                     try:
-                        # Khởi tạo Gemini AI
                         ai = AIProvider(st.session_state.api_key, st.session_state.model_choice)
-                        
                         with st.spinner("AI đang nhận diện Top View và bóc tách thiết bị từ Báo giá..."):
                             st.session_state.result = run_ai_processing(q_file, r_file, edited_df.to_dict("records"), ai)
                             st.session_state.step = 2
                             st.rerun()
-                            
                     except Exception as e:
-                        # BẪY LỖI TOÀN DIỆN TRÁNH CRASH APP
                         st.error(f"❌ Có lỗi xảy ra trong quá trình xử lý AI: {str(e)}")
-                        st.info("💡 Lời khuyên: Hãy kiểm tra lại API Key xem đã chính xác chưa, hoặc file PDF có bị hỏng không.")
+                        st.info("💡 Lời khuyên: Hãy kiểm tra lại API Key xem đã chính xác chưa.")
 
-    # ------------------ GIAI ĐOẠN 2: BẢN ĐỒ TƯƠNG TÁC HTML & XUẤT FILE ------------------
     elif st.session_state.step == 2:
-        st.success("Bước 2: Hệ thống đã kết nối dữ liệu! Hãy kéo thả Icon cho đúng vị trí, click phải để xóa nếu thừa, rồi bấm 'Chốt Bản Đồ & Lưu'.")
+        st.success("Bước 2: Kéo thả Icon cho đúng vị trí, click phải để xóa nếu thừa, rồi bấm 'Chốt Bản Đồ & Lưu'.")
         
         if st.button("⬅️ Quay lại Bước 1"):
             st.session_state.step = 1
@@ -458,25 +457,21 @@ def main():
         else:
             st.warning("⚠️ AI không tìm thấy bản vẽ Top View chuẩn 2D trong file PDF.")
 
-        # Chuẩn bị dữ liệu cho JS Component
         js_items = []
         for eq in result.equipment:
             pts = result.coordinates.get(eq.key, [])
             for p in pts:
                 js_items.append({"key": eq.key, "icon_val": eq.icon_value, "color": eq.color_hex, "x": p[0], "y": p[1]})
 
-        # Gọi Component
         component_value = interactive_map_component(
             bg_base64=bg_b64, 
             items=js_items, 
             key="map_interact"
         )
 
-        # Nhận dữ liệu Component trả về -> XUẤT PPTX
         if component_value and component_value.get("status") == "approved":
             st.divider()
             st.header("📥 BƯỚC CUỐI: Duyệt & Xuất File PPTX")
-            st.info("Màn hình kéo thả đã được ghi nhận thành công! Bảng Legend sẽ tự động điều chỉnh theo số lượng bạn đã chốt.")
             
             final_b64 = component_value.get("final_image_b64")
             final_counts = component_value.get("final_counts", {})
@@ -488,8 +483,7 @@ def main():
                 data=pptx_bytes,
                 file_name="MEP_Layout_Final.pptx",
                 mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                type="primary",
-                use_container_width=True
+                type="primary"
             )
 
 if __name__ == "__main__":
