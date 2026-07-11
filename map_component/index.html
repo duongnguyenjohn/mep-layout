@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
+    <script src="https://unpkg.com/streamlit-component-lib@1.3.0/dist/streamlit.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 10px; background: transparent; }
+        .map-container { position: relative; width: 800px; height: 800px; background-size: 100% 100%; border: 2px solid #005088; margin: 0 auto; overflow: hidden; background-color: #f0f0f0; }
+        .grid-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-image: linear-gradient(rgba(0, 80, 136, 0.4) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 80, 136, 0.4) 1px, transparent 1px); background-size: 133.33px 133.33px; pointer-events: none; z-index: 1; }
+        .icon-node { position: absolute; z-index: 10; cursor: grab; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 4px; color: white; font-size: 14px; font-weight: bold; box-shadow: 0 2px 5px rgba(0,0,0,0.5); user-select: none; }
+        .icon-node:active { cursor: grabbing; z-index: 999; }
+        .toolbar { width: 800px; margin: 10px auto; padding: 10px; background: #fff; border: 1px solid #ccc; border-radius: 8px; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
+        .btn { padding: 8px 16px; background: #005088; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        .btn:hover { background: #003057; }
+        .btn-success { background: #10b981; }
+        .btn-success:hover { background: #059669; }
+        .delete-hint { font-size: 12px; color: #666; }
+    </style>
+</head>
+<body>
+    <div class="toolbar">
+        <div><span class="delete-hint">💡 Kéo thả để di chuyển. Click chuột phải vào Icon để XÓA.</span></div>
+        <div><button class="btn btn-success" id="btn-save" onclick="saveAndSend()">📸 Chốt Bản Đồ & Lưu</button></div>
+    </div>
+    <div class="map-container" id="map-area">
+        <div class="grid-overlay"></div>
+    </div>
+
+    <script>
+        let isDragging = false;
+        let currentDrag = null;
+        let itemsData = [];
+
+        function initComponent() { Streamlit.setFrameHeight(900); }
+
+        function onDataFromPython(event) {
+            if (event.data.type !== "streamlit:render") return;
+            const args = event.data.args;
+            const mapArea = document.getElementById("map-area");
+            if (args.bg_base64) mapArea.style.backgroundImage = `url(${args.bg_base64})`;
+            if (itemsData.length === 0 && args.items) {
+                itemsData = args.items;
+                renderItems();
+            }
+        }
+
+        function renderItems() {
+            const mapArea = document.getElementById("map-area");
+            mapArea.querySelectorAll('.icon-node').forEach(e => e.remove());
+            itemsData.forEach((item, index) => {
+                const node = document.createElement("div");
+                node.className = "icon-node";
+                node.innerHTML = item.icon_val;
+                node.style.backgroundColor = item.color;
+                node.style.left = `${(item.x / 6) * 100}%`;
+                node.style.top = `${(item.y / 6) * 100}%`;
+                node.dataset.index = index;
+
+                node.addEventListener("mousedown", (e) => { if (e.button === 0) { isDragging = true; currentDrag = node; } });
+                node.addEventListener("contextmenu", (e) => { e.preventDefault(); if(confirm("Xóa thiết bị này?")) node.remove(); });
+                mapArea.appendChild(node);
+            });
+        }
+
+        document.addEventListener("mousemove", (e) => {
+            if (isDragging && currentDrag) {
+                const rect = document.getElementById("map-area").getBoundingClientRect();
+                let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
+                let y = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
+                currentDrag.style.left = `${(x / rect.width) * 100}%`;
+                currentDrag.style.top = `${(y / rect.height) * 100}%`;
+            }
+        });
+
+        document.addEventListener("mouseup", () => { isDragging = false; currentDrag = null; });
+
+        function saveAndSend() {
+            const mapArea = document.getElementById("map-area");
+            const btn = document.getElementById("btn-save");
+            btn.innerText = "⏳ Đang chụp màn hình...";
+            
+            let finalCounts = {};
+            document.querySelectorAll('.icon-node').forEach(node => {
+                let key = itemsData[node.dataset.index].key;
+                finalCounts[key] = (finalCounts[key] || 0) + 1;
+            });
+
+            html2canvas(mapArea, { useCORS: true, scale: 2 }).then(canvas => {
+                Streamlit.setComponentValue({ status: "approved", final_image_b64: canvas.toDataURL("image/png"), final_counts: finalCounts });
+                btn.innerText = "✅ Đã gửi! Vui lòng bấm Xuất File trên web.";
+                btn.classList.remove('btn-success');
+            });
+        }
+
+        Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onDataFromPython);
+        Streamlit.setComponentReady();
+        initComponent();
+    </script>
+</body>
+</html>
