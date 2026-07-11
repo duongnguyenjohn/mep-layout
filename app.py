@@ -1,7 +1,7 @@
 """
 ====================================================================================
  HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN V5.4 ĐÁM MÂY — Fix Segfault + Google GenAI SDK (BẢN HOÀN CHỈNH)
+ PHIÊN BẢN V5.5 ĐÁM MÂY — Fix Infinite Loop + Google GenAI SDK
 ====================================================================================
 """
 
@@ -26,18 +26,16 @@ from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 
-# SDK mới của Google Gemini
 try:
     from google import genai
 except ImportError:
     genai = None
 
 # ====================================================================================
-# 0. KHỞI TẠO CUSTOM COMPONENT GIAO TIẾP 2 CHIỀU (AN TOÀN TRÊN CLOUD)
+# 0. KHỞI TẠO CUSTOM COMPONENT GIAO TIẾP 2 CHIỀU (ĐÃ FIX LỖI VÒNG LẶP CLOUD)
 # ====================================================================================
 COMPONENT_DIR = os.path.join(os.path.dirname(__file__), "map_component")
-if not os.path.exists(COMPONENT_DIR):
-    os.makedirs(COMPONENT_DIR, exist_ok=True)
+os.makedirs(COMPONENT_DIR, exist_ok=True)
     
 COMPONENT_HTML = """
 <!DOCTYPE html>
@@ -143,8 +141,12 @@ COMPONENT_HTML = """
 </body>
 </html>
 """
-with open(os.path.join(COMPONENT_DIR, "index.html"), "w", encoding="utf-8") as f:
-    f.write(COMPONENT_HTML)
+
+# KHÓA VÒNG LẶP: CHỈ TẠO FILE NẾU NÓ CHƯA TỒN TẠI
+index_file_path = os.path.join(COMPONENT_DIR, "index.html")
+if not os.path.exists(index_file_path):
+    with open(index_file_path, "w", encoding="utf-8") as f:
+        f.write(COMPONENT_HTML)
 
 interactive_map_component = components.declare_component("interactive_map", path=COMPONENT_DIR)
 
@@ -252,7 +254,7 @@ class AIProvider:
             return "Other"
 
 # ====================================================================================
-# 4. RUN AI PROCESSING (SỬ DỤNG PDF2IMAGE ĐỂ CHỐNG CRASH C++)
+# 4. RUN AI PROCESSING
 # ====================================================================================
 def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvider) -> PipelineResult:
     result = PipelineResult()
