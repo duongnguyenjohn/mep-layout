@@ -1,18 +1,17 @@
 """
 ====================================================================================
  HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN V5.5 ĐÁM MÂY — Fix Infinite Loop + Google GenAI SDK
+ PHIÊN BẢN V5.5 ĐÁM MÂY — Tối ưu RAM & Chuẩn hóa Custom Component
 ====================================================================================
 """
 
 import io
-import json
-import math
 import os
 import random
 import re
 import unicodedata
 import base64
+import gc
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -23,7 +22,7 @@ from PIL import Image
 from pypdf import PdfReader
 from pdf2image import convert_from_bytes
 from pptx import Presentation
-from pptx.util import Inches, Pt
+from pptx.util import Inches
 from pptx.dml.color import RGBColor
 
 try:
@@ -32,130 +31,15 @@ except ImportError:
     genai = None
 
 # ====================================================================================
-# 0. KHỞI TẠO CUSTOM COMPONENT GIAO TIẾP 2 CHIỀU (ĐÃ FIX LỖI VÒNG LẶP CLOUD)
+# 0. KHAI BÁO CUSTOM COMPONENT (GỌI ĐẾN THƯ MỤC map_component TRÊN GITHUB)
 # ====================================================================================
 COMPONENT_DIR = os.path.join(os.path.dirname(__file__), "map_component")
-os.makedirs(COMPONENT_DIR, exist_ok=True)
-    
-COMPONENT_HTML = """
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
-    <script src="https://unpkg.com/streamlit-component-lib@1.3.0/dist/streamlit.js"></script>
-    <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 10px; background: transparent; }
-        .map-container { position: relative; width: 800px; height: 800px; background-size: 100% 100%; border: 2px solid #005088; margin: 0 auto; overflow: hidden; background-color: #f0f0f0; }
-        .grid-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-image: linear-gradient(rgba(0, 80, 136, 0.4) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 80, 136, 0.4) 1px, transparent 1px); background-size: 133.33px 133.33px; pointer-events: none; z-index: 1; }
-        .icon-node { position: absolute; z-index: 10; cursor: grab; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 4px; color: white; font-size: 14px; font-weight: bold; box-shadow: 0 2px 5px rgba(0,0,0,0.5); user-select: none; }
-        .icon-node:active { cursor: grabbing; z-index: 999; }
-        .toolbar { width: 800px; margin: 10px auto; padding: 10px; background: #fff; border: 1px solid #ccc; border-radius: 8px; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
-        .btn { padding: 8px 16px; background: #005088; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
-        .btn:hover { background: #003057; }
-        .btn-success { background: #10b981; }
-        .btn-success:hover { background: #059669; }
-        .delete-hint { font-size: 12px; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="toolbar">
-        <div><span class="delete-hint">💡 Kéo thả để di chuyển. Click chuột phải vào Icon để XÓA.</span></div>
-        <div><button class="btn btn-success" id="btn-save" onclick="saveAndSend()">📸 Chốt Bản Đồ & Lưu</button></div>
-    </div>
-    <div class="map-container" id="map-area">
-        <div class="grid-overlay"></div>
-    </div>
-
-    <script>
-        let isDragging = false;
-        let currentDrag = null;
-        let itemsData = [];
-
-        function initComponent() { Streamlit.setFrameHeight(900); }
-
-        function onDataFromPython(event) {
-            if (event.data.type !== "streamlit:render") return;
-            const args = event.data.args;
-            const mapArea = document.getElementById("map-area");
-            if (args.bg_base64) mapArea.style.backgroundImage = `url(${args.bg_base64})`;
-            if (itemsData.length === 0 && args.items) {
-                itemsData = args.items;
-                renderItems();
-            }
-        }
-
-        function renderItems() {
-            const mapArea = document.getElementById("map-area");
-            mapArea.querySelectorAll('.icon-node').forEach(e => e.remove());
-            itemsData.forEach((item, index) => {
-                const node = document.createElement("div");
-                node.className = "icon-node";
-                node.innerHTML = item.icon_val;
-                node.style.backgroundColor = item.color;
-                node.style.left = `${(item.x / 6) * 100}%`;
-                node.style.top = `${(item.y / 6) * 100}%`;
-                node.dataset.index = index;
-
-                node.addEventListener("mousedown", (e) => { if (e.button === 0) { isDragging = true; currentDrag = node; } });
-                node.addEventListener("contextmenu", (e) => { e.preventDefault(); if(confirm("Xóa thiết bị này?")) node.remove(); });
-                mapArea.appendChild(node);
-            });
-        }
-
-        document.addEventListener("mousemove", (e) => {
-            if (isDragging && currentDrag) {
-                const rect = document.getElementById("map-area").getBoundingClientRect();
-                let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-                let y = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
-                currentDrag.style.left = `${(x / rect.width) * 100}%`;
-                currentDrag.style.top = `${(y / rect.height) * 100}%`;
-            }
-        });
-
-        document.addEventListener("mouseup", () => { isDragging = false; currentDrag = null; });
-
-        function saveAndSend() {
-            const mapArea = document.getElementById("map-area");
-            const btn = document.getElementById("btn-save");
-            btn.innerText = "⏳ Đang chụp màn hình...";
-            
-            let finalCounts = {};
-            document.querySelectorAll('.icon-node').forEach(node => {
-                let key = itemsData[node.dataset.index].key;
-                finalCounts[key] = (finalCounts[key] || 0) + 1;
-            });
-
-            html2canvas(mapArea, { useCORS: true, scale: 2 }).then(canvas => {
-                Streamlit.setComponentValue({ status: "approved", final_image_b64: canvas.toDataURL("image/png"), final_counts: finalCounts });
-                btn.innerText = "✅ Đã gửi! Vui lòng bấm Xuất File trên web.";
-                btn.classList.remove('btn-success');
-            });
-        }
-
-        Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onDataFromPython);
-        Streamlit.setComponentReady();
-        initComponent();
-    </script>
-</body>
-</html>
-"""
-
-# KHÓA VÒNG LẶP: CHỈ TẠO FILE NẾU NÓ CHƯA TỒN TẠI
-index_file_path = os.path.join(COMPONENT_DIR, "index.html")
-if not os.path.exists(index_file_path):
-    with open(index_file_path, "w", encoding="utf-8") as f:
-        f.write(COMPONENT_HTML)
-
 interactive_map_component = components.declare_component("interactive_map", path=COMPONENT_DIR)
-
 
 # ====================================================================================
 # 1. CẤU HÌNH MẶC ĐỊNH
 # ====================================================================================
 AI_MODEL_DEFAULT = "gemini-1.5-pro"
-GRID_METERS = 6.0
 STOPWORDS_VI = {"và", "cho", "của", "tại"}
 SLIDE_TYPES = ["Booth Location", "Perspective View", "Booth Dimensions"]
 
@@ -227,7 +111,7 @@ def regex_extract_quantities(text: str, labels: list) -> dict:
     return found
 
 # ====================================================================================
-# 3. AI PROVIDER (GOOGLE GENAI 2026)
+# 3. AI PROVIDER
 # ====================================================================================
 class AIProvider:
     def __init__(self, api_key: str, model: str):
@@ -259,24 +143,21 @@ class AIProvider:
 def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvider) -> PipelineResult:
     result = PipelineResult()
     
-    # 1. Bóc tách báo giá
     quotation_text = read_quotation_as_text(quotation_file.read(), quotation_file.name)
     labels = [str(r.get("Tên thiết bị", "")).strip() for r in table_rows if str(r.get("Tên thiết bị", "")).strip()]
     regex_found = regex_extract_quantities(quotation_text, labels) if quotation_text else {}
     
     for idx, row in enumerate(table_rows):
         label = str(row["Tên thiết bị"]).strip()
-        default_qty = int(row["Số lượng"])
-        synced_qty = regex_found.get(label, default_qty) 
-        
+        synced_qty = regex_found.get(label, int(row["Số lượng"])) 
         result.equipment.append(EquipmentRow(
             key=slugify(label, idx), label=label, icon_value=row["Biểu tượng vẽ"],
             color_hex=row["Mã màu Hex"], zone_raw=row["Vị trí ưu tiên"], 
             power=row["Công suất"], quantity=int(synced_qty)
         ))
     
-    # 2. Xử lý PDF an toàn bằng pdf2image + poppler
-    images = convert_from_bytes(review_file.read(), dpi=150)
+    # Giải phóng RAM: Giảm DPI xuống 100 để tránh tràn 1GB RAM của Cloud
+    images = convert_from_bytes(review_file.read(), dpi=100)
     classified = {t: None for t in SLIDE_TYPES}
     
     for img in images:
@@ -290,11 +171,14 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
     result.perspective_img = classified["Perspective View"]
     result.dimensions_img = classified["Booth Dimensions"]
     
-    # 3. Rải đều toạ độ
     coords = {}
     for it in result.equipment:
         coords[it.key] = [[round(random.uniform(1.0, 5.0), 2), round(random.uniform(1.0, 5.0), 2)] for _ in range(it.quantity)]
     result.coordinates = coords
+    
+    # Thu gom rác để chống OOM (Out of Memory)
+    del images
+    gc.collect()
     
     return result
 
@@ -357,13 +241,13 @@ def main():
         st.session_state.result = None
         st.session_state.equipment_table = pd.DataFrame(DEFAULT_EQUIPMENT_CONFIG)
 
-    st.title("⚡ MEP Layout Auto-Generator (Cloud Safe)")
+    st.title("⚡ MEP Layout Auto-Generator (Cloud Optimized)")
     
     if st.session_state.step == 1:
         st.info("Bước 1: Cấu hình bảng Legend và Upload file thiết kế (Quotation + 3D Review).")
         c1, c2 = st.columns([1, 1])
         with c1:
-            edited_df = st.data_editor(st.session_state.equipment_table, num_rows="dynamic")
+            edited_df = st.data_editor(st.session_state.equipment_table, num_rows="dynamic", use_container_width=True)
             st.session_state.equipment_table = edited_df
         with c2:
             st.sidebar.text_input("Google Gemini API Key", key="api_key", type="password")
@@ -372,7 +256,7 @@ def main():
             q_file = st.file_uploader("File Báo Giá (PDF/Excel)")
             r_file = st.file_uploader("File 3D Review (PDF)")
             
-            if st.button("🚀 Xử Lý AI Khởi Tạo Bản Đồ"):
+            if st.button("🚀 Xử Lý AI Khởi Tạo Bản Đồ", type="primary"):
                 if not st.session_state.api_key: 
                     st.error("⚠️ Vui lòng nhập API Key!")
                 elif not q_file or not r_file: 
@@ -428,7 +312,8 @@ def main():
                 label="🎉 TẢI XUỐNG FILE MEP LAYOUT (.PPTX)",
                 data=pptx_bytes,
                 file_name="MEP_Layout_Final.pptx",
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                type="primary"
             )
 
 if __name__ == "__main__":
