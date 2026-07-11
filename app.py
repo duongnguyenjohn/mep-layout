@@ -54,6 +54,7 @@ import os
 import platform
 import random
 import re
+import fitz
 import unicodedata
 from dataclasses import dataclass, field
 from typing import Optional
