@@ -1,44 +1,9 @@
 """
 ====================================================================================
  HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN V3 — Flexible Legend Editor + Dynamic Vision Analysis
+ PHIÊN BẢN V5.4 ĐÁM MÂY — Fix Segfault + Google GenAI SDK (BẢN HOÀN CHỈNH)
 ====================================================================================
-
-Streamlit end-to-end: Bảng Legend đa phương thức (chữ / emoji / ảnh) + Upload 2 file
---> Submit --> 4 Round xử lý ngầm --> Download "Electrical Layout.pptx" (đúng 4 slide).
-
-Round 1 : Đọc & khớp số lượng thiết bị từ file Quotation (PDF/Excel) với Bảng cấu hình
-          (bảng KHÔNG còn danh mục cố định — người dùng có thể thêm/xoá dòng tuỳ dự án).
-Round 2 : Dynamic Vision Analysis — quét TOÀN BỘ file 3D review (số trang không cố định),
-          dùng Vision LLM (Claude hoặc GPT-4o) tìm Booth Location / Perspective View /
-          Booth Dimensions (Top View), rồi đối chiếu chéo (Cross-view) để suy ra toạ độ
-          kỹ thuật (X, Y) trên lưới sàn 0-6m.
-Round 3 : Vẽ đè ký hiệu LINH HOẠT (Pillow) — tự nhận diện biểu tượng người dùng nhập là
-          chữ/ký tự/emoji (draw.text) hay đường dẫn ảnh/URL (Image.open + paste), kèm
-          thuật toán chống chồng chất (Jittering Offset 5-12 pixel).
-Round 4 : Đóng gói đúng 4 slide: Booth Location / Perspective View / Booth Dimensions
-          (sơ bộ) / MEP Layout (chi tiết, dày ký hiệu + bảng Legend góc phải).
-
---------------------------------------------------------------------------------------
-CẤU HÌNH macOS & POPPLER (FIX LỖI CRASH):
-pdf2image cần Poppler. App tự động dò `poppler_path` theo dòng chip Mac và truyền vào
-hàm convert_from_bytes() để tránh hoàn toàn lỗi PopplerNotInstalledError:
-  - Apple Silicon (arm64) : /opt/homebrew/bin
-  - Intel (x86_64)        : /usr/local/bin
-Cài Poppler trước khi chạy: `brew install poppler`
---------------------------------------------------------------------------------------
-
-Cấu hình API Key: nhập ở sidebar (chỉ dùng trong phiên) hoặc set biến môi trường
-ANTHROPIC_API_KEY / OPENAI_API_KEY trước khi chạy `streamlit run app.py`.
-
-Cài đặt thư viện Python:
-    pip install streamlit pypdf pdf2image python-pptx Pillow pandas openpyxl anthropic openai requests
-====================================================================================
- HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG 
- (Electrical Layout Auto-Generator V5.3)
-                         =============================
 """
-
 
 import io
 import json
