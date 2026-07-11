@@ -33,14 +33,10 @@ ANTHROPIC_API_KEY / OPENAI_API_KEY trước khi chạy `streamlit run app.py`.
 
 Cài đặt thư viện Python:
     pip install streamlit pypdf pdf2image python-pptx Pillow pandas openpyxl anthropic openai requests
-"""
-"""
-"""
-"""
 ====================================================================================
- HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN V5.3
-====================================================================================
+ HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG 
+ (Electrical Layout Auto-Generator V5.3)
+                         =============================
 """
 
 
