@@ -36,11 +36,12 @@ Cài đặt thư viện Python:
 """
 """
 """
-====================================================================================
+'''====================================================================================
  HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN V5.3 CLOUD-SAFE — Chống Segfault + Nâng cấp Google GenAI SDK mới nhất
+ PHIÊN BẢN V5.3
 ====================================================================================
 """
+
 
 import io
 import json
@@ -49,7 +50,6 @@ import os
 import random
 import re
 import unicodedata
-import tempfile
 import base64
 from dataclasses import dataclass, field
 from typing import Optional
@@ -59,23 +59,24 @@ import streamlit as st
 import streamlit.components.v1 as components
 from PIL import Image
 from pypdf import PdfReader
-import pypdfium2 as pdfium
+from pdf2image import convert_from_bytes
 from pptx import Presentation
 from pptx.util import Inches, Pt
 from pptx.dml.color import RGBColor
 
-# SDK mới của Google Gemini (Năm 2026)
+# SDK mới của Google Gemini
 try:
     from google import genai
 except ImportError:
     genai = None
 
 # ====================================================================================
-# 0. KHỞI TẠO CUSTOM COMPONENT GIAO TIẾP 2 CHIỀU (GHI VÀO THƯ MỤC TẠM /tmp ĐỂ CHỐNG CRASH)
+# 0. KHỞI TẠO CUSTOM COMPONENT GIAO TIẾP 2 CHIỀU (AN TOÀN TRÊN CLOUD)
 # ====================================================================================
-COMPONENT_DIR = os.path.join(tempfile.gettempdir(), "map_component")
-os.makedirs(COMPONENT_DIR, exist_ok=True)
-
+COMPONENT_DIR = os.path.join(os.path.dirname(__file__), "map_component")
+if not os.path.exists(COMPONENT_DIR):
+    os.makedirs(COMPONENT_DIR, exist_ok=True)
+    
 COMPONENT_HTML = """
 <!DOCTYPE html>
 <html lang="vi">
@@ -168,7 +169,7 @@ COMPONENT_HTML = """
 
             html2canvas(mapArea, { useCORS: true, scale: 2 }).then(canvas => {
                 Streamlit.setComponentValue({ status: "approved", final_image_b64: canvas.toDataURL("image/png"), final_counts: finalCounts });
-                btn.innerText = "✅ Đã gửi! Vui lòng bấm Xuất File.";
+                btn.innerText = "✅ Đã gửi! Vui lòng bấm Xuất File trên web.";
                 btn.classList.remove('btn-success');
             });
         }
@@ -199,9 +200,8 @@ DEFAULT_EQUIPMENT_CONFIG = [
     {"Tên thiết bị": "Ổ cắm 5A/220V", "Biểu tượng vẽ": "●", "Mã màu Hex": "#D62728", "Vị trí ưu tiên": "Bàn tư vấn", "Công suất": "220V", "Số lượng": 3},
 ]
 
-
 # ====================================================================================
-# 2. DATA STRUCTURES & HELPER LÕI
+# 2. DATA STRUCTURES & HELPER
 # ====================================================================================
 @dataclass
 class EquipmentRow:
@@ -220,8 +220,6 @@ class PipelineResult:
     perspective_img: Optional[Image.Image] = None
     dimensions_img: Optional[Image.Image] = None
     coordinates: dict = field(default_factory=dict)
-    log: list = field(default_factory=list)
-    errors: list = field(default_factory=list)
 
 def slugify(text: str, idx: int) -> str:
     try:
@@ -237,7 +235,7 @@ def read_quotation_as_text(file_bytes: bytes, filename: str) -> str:
             reader = PdfReader(io.BytesIO(file_bytes))
             return "\n".join(page.extract_text() or "" for page in reader.pages)
         elif ext in (".xlsx", ".xls"):
-            sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None, engine="openpyxl" if ext == ".xlsx" else None)
+            sheets = pd.read_excel(io.BytesIO(file_bytes), sheet_name=None)
             return "\n".join(df.to_string(index=False) for df in sheets.values())
         elif ext == ".csv":
             return pd.read_csv(io.BytesIO(file_bytes)).to_string(index=False)
@@ -248,7 +246,7 @@ def extract_salient_tokens(label: str) -> list:
     tokens = re.split(r"[\s/()\-,]+", (label or "").lower())
     return [t for t in tokens if len(t) >= 2 and t not in STOPWORDS_VI]
 
-def regex_extract_quantities_generic(text: str, labels: list) -> dict:
+def regex_extract_quantities(text: str, labels: list) -> dict:
     found = {}
     lines = text.lower().splitlines()
     qty_patterns = [r"(?:sl|qty|số lượng)\s*[:.\-]?\s*(\d+)", r"x\s*(\d+)\b", r"\b(\d+)\s*(?:bộ|cái|chiếc|nos|no)\b"]
@@ -264,23 +262,22 @@ def regex_extract_quantities_generic(text: str, labels: list) -> dict:
         if best_qty > 0: found[label] = best_qty
     return found
 
-
 # ====================================================================================
-# 3. AI PROVIDER (GOOGLE GENAI SDK 2026)
+# 3. AI PROVIDER (GOOGLE GENAI 2026)
 # ====================================================================================
 class AIProvider:
     def __init__(self, api_key: str, model: str):
         if genai is None:
-            raise RuntimeError("Chưa cài thư viện. Vui lòng thêm google-genai vào requirements.txt")
+            raise RuntimeError("Chưa cài đặt google-genai.")
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
     def classify_slide_image(self, image: Image.Image) -> str:
         system_prompt = (
             "Phân loại hình ảnh trang PDF này vào ĐÚNG MỘT nhãn sau (chỉ trả về tên nhãn):\n"
-            "- Booth Location (Mặt bằng khu vực tổng thể toàn hội chợ).\n"
-            "- Perspective View (Phối cảnh 3D góc chéo, có chiều sâu 3D, thấy tường, trần, bàn ghế nổi lên).\n"
-            "- Booth Dimensions (BẮT BUỘC là mặt bằng 2D nhìn thẳng góc 90 độ từ trên xuống - Top view. Thể hiện không gian phẳng 2D, thường có đường kích thước hoặc lưới. TUYỆT ĐỐI KHÔNG CHỌN nhãn này nếu hình ảnh có góc chéo 3D).\n"
+            "- Booth Location (Mặt bằng khu vực tổng thể).\n"
+            "- Perspective View (Phối cảnh 3D góc chéo).\n"
+            "- Booth Dimensions (Mặt bằng 2D nhìn thẳng từ trên xuống - Top view, KHÔNG góc chéo).\n"
             "- Other."
         )
         try:
@@ -289,12 +286,11 @@ class AIProvider:
                 contents=[system_prompt, image]
             )
             return response.text.strip()
-        except Exception as e:
+        except:
             return "Other"
 
-
 # ====================================================================================
-# 4. RUN AI PROCESSING (PYPDFIUM2 THAY THẾ CHO PYMUPDF CHỐNG CRASH)
+# 4. RUN AI PROCESSING (SỬ DỤNG PDF2IMAGE ĐỂ CHỐNG CRASH C++)
 # ====================================================================================
 def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvider) -> PipelineResult:
     result = PipelineResult()
@@ -302,7 +298,7 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
     # 1. Bóc tách báo giá
     quotation_text = read_quotation_as_text(quotation_file.read(), quotation_file.name)
     labels = [str(r.get("Tên thiết bị", "")).strip() for r in table_rows if str(r.get("Tên thiết bị", "")).strip()]
-    regex_found = regex_extract_quantities_generic(quotation_text, labels) if quotation_text else {}
+    regex_found = regex_extract_quantities(quotation_text, labels) if quotation_text else {}
     
     for idx, row in enumerate(table_rows):
         label = str(row["Tên thiết bị"]).strip()
@@ -315,24 +311,17 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
             power=row["Công suất"], quantity=int(synced_qty)
         ))
     
-    # 2. Xử lý PDF bằng pypdfium2 (Rất an toàn trên Cloud)
-    pdf = pdfium.PdfDocument(review_file)
+    # 2. Xử lý PDF an toàn bằng pdf2image + poppler
+    images = convert_from_bytes(review_file.read(), dpi=150)
     classified = {t: None for t in SLIDE_TYPES}
     
-    for i in range(len(pdf)):
-        page = pdf[i]
-        bitmap = page.render(scale=2.0)  # Scale=2.0 cho ảnh nét
-        img = bitmap.to_pil()
-        page.close()
-        
+    for img in images:
         label = ai.classify_slide_image(img)
         for t in SLIDE_TYPES:
             if t in label and classified[t] is None:
                 classified[t] = img
                 break
                 
-    pdf.close()
-    
     result.booth_location_img = classified["Booth Location"]
     result.perspective_img = classified["Perspective View"]
     result.dimensions_img = classified["Booth Dimensions"]
@@ -344,7 +333,6 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
     result.coordinates = coords
     
     return result
-
 
 # ====================================================================================
 # 5. HÀM TẠO PPTX
@@ -363,19 +351,16 @@ def export_final_pptx(result: PipelineResult, final_b64_image: str, final_counts
         img_obj.convert("RGB").save(buf, format="PNG")
         slide.shapes.add_picture(buf, left, top, width=pic_w, height=pic_h)
 
-    # Slide 1, 2, 3
     for img in [result.booth_location_img, result.perspective_img, result.dimensions_img]:
         s = prs.slides.add_slide(blank)
         if img: add_img(s, img)
 
-    # Slide 4:
     s4 = prs.slides.add_slide(blank)
     if final_b64_image:
         header, encoded = final_b64_image.split(",", 1)
         final_img = Image.open(io.BytesIO(base64.b64decode(encoded)))
         add_img(s4, final_img)
 
-        # Legend
         rows = []
         for eq in result.equipment:
             qty = final_counts.get(eq.key, 0)
@@ -397,37 +382,35 @@ def export_final_pptx(result: PipelineResult, final_b64_image: str, final_counts
     prs.save(out)
     return out.getvalue()
 
-
 # ====================================================================================
 # 6. GIAO DIỆN CHÍNH
 # ====================================================================================
 def main():
-    st.set_page_config(page_title="MEP Layout Auto V5.3", page_icon="⚡", layout="wide")
+    st.set_page_config(page_title="MEP Layout Auto", page_icon="⚡", layout="wide")
     
     if "step" not in st.session_state:
         st.session_state.step = 1
         st.session_state.result = None
         st.session_state.equipment_table = pd.DataFrame(DEFAULT_EQUIPMENT_CONFIG)
 
-    st.title("⚡ MEP Layout Auto-Generator V5.3 — Cloud Safe (Gemini Pro)")
+    st.title("⚡ MEP Layout Auto-Generator (Cloud Safe)")
     
     if st.session_state.step == 1:
         st.info("Bước 1: Cấu hình bảng Legend và Upload file thiết kế (Quotation + 3D Review).")
         c1, c2 = st.columns([1, 1])
         with c1:
-            # Đã fix lỗi warning use_container_width
-            edited_df = st.data_editor(st.session_state.equipment_table, num_rows="dynamic", width="stretch")
+            edited_df = st.data_editor(st.session_state.equipment_table, num_rows="dynamic")
             st.session_state.equipment_table = edited_df
         with c2:
-            st.sidebar.text_input("Google Gemini API Key (bắt buộc)", key="api_key", type="password")
+            st.sidebar.text_input("Google Gemini API Key", key="api_key", type="password")
             st.sidebar.selectbox("Model", ["gemini-1.5-pro", "gemini-2.5-flash"], key="model_choice")
             
             q_file = st.file_uploader("File Báo Giá (PDF/Excel)")
             r_file = st.file_uploader("File 3D Review (PDF)")
             
-            if st.button("🚀 Xử Lý AI Khởi Tạo Bản Đồ", type="primary"):
+            if st.button("🚀 Xử Lý AI Khởi Tạo Bản Đồ"):
                 if not st.session_state.api_key: 
-                    st.error("⚠️ Vui lòng nhập API Key của Google Gemini ở Sidebar!")
+                    st.error("⚠️ Vui lòng nhập API Key!")
                 elif not q_file or not r_file: 
                     st.error("⚠️ Vui lòng upload đầy đủ 2 file!")
                 else:
@@ -439,10 +422,9 @@ def main():
                             st.rerun()
                     except Exception as e:
                         st.error(f"❌ Có lỗi xảy ra trong quá trình xử lý AI: {str(e)}")
-                        st.info("💡 Lời khuyên: Hãy kiểm tra lại API Key xem đã chính xác chưa.")
 
     elif st.session_state.step == 2:
-        st.success("Bước 2: Kéo thả Icon cho đúng vị trí, click phải để xóa nếu thừa, rồi bấm 'Chốt Bản Đồ & Lưu'.")
+        st.success("Bước 2: Kéo thả Icon cho đúng vị trí, click phải để xóa, rồi bấm 'Chốt Bản Đồ & Lưu'.")
         
         if st.button("⬅️ Quay lại Bước 1"):
             st.session_state.step = 1
@@ -482,8 +464,7 @@ def main():
                 label="🎉 TẢI XUỐNG FILE MEP LAYOUT (.PPTX)",
                 data=pptx_bytes,
                 file_name="MEP_Layout_Final.pptx",
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                type="primary"
+                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation"
             )
 
 if __name__ == "__main__":
