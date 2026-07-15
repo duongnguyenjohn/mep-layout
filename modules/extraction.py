@@ -1,74 +1,75 @@
 import pdfplumber
-from anthropic import Anthropic
+import google.generativeai as genai
 import json
 import os
 
 def extract_and_align_data(quote_file, review_3d_file):
     """
-    Đọc text từ file Báo giá & 3D, sau đó đẩy qua Claude 3.5 Sonnet 
-    để tạo JSON ánh xạ tọa độ (Cross-View Triangulation).
+    Sử dụng Gemini 1.5 Flash miễn phí để đọc text từ Báo giá & 3D, 
+    xuất JSON ánh xạ tọa độ.
     """
+    # 1. Trích xuất text từ Báo giá
     quote_text = ""
-    # Trích xuất dữ liệu chữ từ file Báo giá PDF
     with pdfplumber.open(quote_file) as pdf:
         for page in pdf.pages:
             quote_text += page.extract_text() or ""
             
+    # 2. Trích xuất text từ Thiết kế 3D
     review_text = ""
-    # Trích xuất dữ liệu chữ/thông số kỹ thuật từ file bản vẽ 3D PDF
     with pdfplumber.open(review_3d_file) as pdf:
         for page in pdf.pages:
             review_text += page.extract_text() or ""
 
-    # Lấy API Key từ cấu hình hệ thống
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    # 3. Kết nối API Gemini
+    api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
-        raise ValueError("Không tìm thấy ANTHROPIC_API_KEY trong cấu hình hệ thống!")
+        raise ValueError("Không tìm thấy GEMINI_API_KEY trong cấu hình hệ thống!")
 
-    client = Anthropic(api_key=api_key)
+    genai.configure(api_key=api_key)
     
-    # Prompt Kỹ thuật Ép Claude xuất định dạng JSON cấu trúc cao
+    # Sử dụng mô hình gemini-1.5-flash (Nhanh và hỗ trợ Free Tier tốt nhất)
+    model = genai.GenerativeModel('gemini-1.5-flash')
+    
     prompt = f"""
-    Bạn là một kỹ sư hệ thống MEP lão luyện. Nhiệm vụ của bạn là phân tích đồng thời tài liệu Báo giá và Thiết kế 3D dưới đây để hạ cánh (Triangulation) thiết bị xuống lưới tọa độ mặt bằng 2D (Lưới chuẩn 6x6 mét).
+    Bạn là một kỹ sư hệ thống MEP. Hãy phân tích tài liệu Báo giá và Thiết kế 3D dưới đây để hạ cánh thiết bị xuống lưới tọa độ 2D (Lưới 6x6 mét).
 
-    DỮ LIỆU BÁO GIÁ (QUOTATION):
+    BÁO GIÁ:
     {quote_text}
 
-    DỮ LIỆU THIẾT KẾ 3D (3D REVIEW):
+    THIẾT KẾ 3D:
     {review_text}
 
     YÊU CẦU:
-    1. Đọc và đếm chính xác số lượng thiết bị điện từ Báo giá.
-    2. Khớp các thiết bị đó với các khu vực chức năng được mô tả trong bản vẽ 3D (vách kỹ thuật, lối đi, quầy tiếp tân...).
-    3. Trả về kết quả CHỈ là một chuỗi JSON hợp lệ (Không chứa mã markdown ```json, không giải thích dài dòng).
-
-    CẤU TRÚC JSON BẮT BUỘC TRẢ VỀ:
+    Trả về CHỈ một chuỗi JSON hợp lệ cấu trúc như sau, KHÔNG CÓ BẤT KỲ VĂN BẢN NÀO KHÁC BÊN NGOÀI:
     [
       {{
-        "item_name": "Tên thiết bị điện chính xác",
+        "item_name": "Tên thiết bị",
         "quantity": 1,
         "x": 4.5,
         "y": 3.2,
         "assigned_layer": "LAYER_MEP_DEVICES",
-        "icon": "default_icon.png"
+        "icon": "default.png"
       }}
     ]
-    Lưu ý: Nếu một thiết bị có số lượng > 1, hãy tạo ra các phần tử riêng biệt trong mảng với các tọa độ X, Y dịch chuyển nhẹ để phân bổ đủ số lượng thực tế.
     """
 
-    response = client.messages.create(
-        model="claude-3-5-sonnet-20241022",
-        max_tokens=4000,
-        temperature=0,
-        messages=[{"role": "user", "content": prompt}]
-    )
+    # 4. Gửi yêu cầu và nhận kết quả
+    response = model.generate_content(prompt)
+    raw_text = response.text.strip()
     
-    # Ép kiểu dữ liệu phản hồi về dạng List/Dict Python
+    # Xử lý làm sạch chuỗi: Gemini đôi khi tự bọc code trong block markdown ```json ... ```
+    if raw_text.startswith("```json"):
+        raw_text = raw_text[7:]
+    elif raw_text.startswith("```"):
+        raw_text = raw_text[3:]
+        
+    if raw_text.endswith("```"):
+        raw_text = raw_text[:-3]
+
     try:
-        raw_json = response.content[0].text.strip()
-        return json.loads(raw_json)
+        return json.loads(raw_text.strip())
     except Exception as e:
-        # Cơ chế dự phòng (Fallback) nếu AI trả về chuỗi lỗi
+        # Dữ liệu dự phòng nếu xử lý text có lỗi
         return [
-            {"item_name": "Nguồn 20A Máy CNC (Lỗi Phân Tích AI)", "quantity": 1, "x": 3.0, "y": 3.0, "assigned_layer": "LAYER_MEP_DEVICES", "icon": "power.png"}
+            {"item_name": f"Lỗi đọc JSON: {str(e)}", "quantity": 1, "x": 3.0, "y": 3.0, "assigned_layer": "LAYER_MEP_DEVICES", "icon": "error.png"}
         ]
