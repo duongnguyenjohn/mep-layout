@@ -54,7 +54,7 @@ def extract_and_align_data(quote_file, review_3d_file):
 
     # 4. Gửi yêu cầu và nhận kết quả bằng mô hình mới nhất
     response = client.models.generate_content(
-        model='gemini-1.5-flash',
+        model='gemini-3.5-flash',
         contents=prompt,
     )
     
