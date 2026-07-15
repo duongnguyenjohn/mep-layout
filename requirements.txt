@@ -2,6 +2,6 @@ streamlit
 google-genai
 pdfplumber
 pandas
-ezdxf
+openpyxl
 python-pptx
-streamlit-drawable-canvas
+plotly
