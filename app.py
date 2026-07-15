@@ -1,7 +1,7 @@
 """
 ====================================================================================
  HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN V6.0 — AI Smart Cropping (Tự cắt Top View) + Caching Component
+ PHIÊN BẢN CHUNG KẾT — Đọc Component Tĩnh Chuẩn Tài Liệu Streamlit
 ====================================================================================
 """
 
@@ -13,7 +13,6 @@ import json
 import unicodedata
 import base64
 import gc
-import tempfile
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -33,124 +32,12 @@ except ImportError:
     genai = None
 
 # ====================================================================================
-# 0. KHỞI TẠO CUSTOM COMPONENT BẰNG CACHE (ĐẢM BẢO 100% KHÔNG LỖI LOAD)
+# 0. NẠP CUSTOM COMPONENT THEO CHUẨN TÀI LIỆU
+# Lấy đường dẫn tuyệt đối của thư mục 'map_component' (phải tồn tại vật lý trên GitHub)
 # ====================================================================================
-COMPONENT_HTML = """
-<!DOCTYPE html>
-<html lang="vi">
-<head>
-    <meta charset="UTF-8">
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://html2canvas.hertzen.com/dist/html2canvas.min.js"></script>
-    <script src="https://unpkg.com/streamlit-component-lib@1.3.0/dist/streamlit.js"></script>
-    <style>
-        body { font-family: 'Segoe UI', Arial, sans-serif; margin: 0; padding: 10px; background: transparent; }
-        .map-container { position: relative; width: 800px; height: 800px; background-size: 100% 100%; border: 2px solid #005088; margin: 0 auto; overflow: hidden; background-color: #f0f0f0; }
-        .grid-overlay { position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-image: linear-gradient(rgba(0, 80, 136, 0.4) 1px, transparent 1px), linear-gradient(90deg, rgba(0, 80, 136, 0.4) 1px, transparent 1px); background-size: 133.33px 133.33px; pointer-events: none; z-index: 1; }
-        .icon-node { position: absolute; z-index: 10; cursor: grab; transform: translate(-50%, -50%); display: flex; align-items: center; justify-content: center; width: 30px; height: 30px; border-radius: 4px; color: white; font-size: 14px; font-weight: bold; box-shadow: 0 2px 5px rgba(0,0,0,0.5); user-select: none; }
-        .icon-node:active { cursor: grabbing; z-index: 999; }
-        .toolbar { width: 800px; margin: 10px auto; padding: 10px; background: #fff; border: 1px solid #ccc; border-radius: 8px; display: flex; gap: 10px; align-items: center; justify-content: space-between; }
-        .btn { padding: 8px 16px; background: #005088; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
-        .btn:hover { background: #003057; }
-        .btn-success { background: #10b981; }
-        .btn-success:hover { background: #059669; }
-        .delete-hint { font-size: 12px; color: #666; }
-    </style>
-</head>
-<body>
-    <div class="toolbar">
-        <div><span class="delete-hint">💡 Kéo thả để di chuyển. Click chuột phải vào Icon để XÓA.</span></div>
-        <div><button class="btn btn-success" id="btn-save" onclick="saveAndSend()">📸 Chốt Bản Đồ & Lưu</button></div>
-    </div>
-    <div class="map-container" id="map-area">
-        <div class="grid-overlay"></div>
-    </div>
-
-    <script>
-        let isDragging = false;
-        let currentDrag = null;
-        let itemsData = [];
-
-        function initComponent() { Streamlit.setFrameHeight(900); }
-
-        function onDataFromPython(event) {
-            if (event.data.type !== "streamlit:render") return;
-            const args = event.data.args;
-            const mapArea = document.getElementById("map-area");
-            if (args.bg_base64) mapArea.style.backgroundImage = `url(${args.bg_base64})`;
-            if (itemsData.length === 0 && args.items) {
-                itemsData = args.items;
-                renderItems();
-            }
-        }
-
-        function renderItems() {
-            const mapArea = document.getElementById("map-area");
-            mapArea.querySelectorAll('.icon-node').forEach(e => e.remove());
-            itemsData.forEach((item, index) => {
-                const node = document.createElement("div");
-                node.className = "icon-node";
-                node.innerHTML = item.icon_val;
-                node.style.backgroundColor = item.color;
-                node.style.left = `${(item.x / 6) * 100}%`;
-                node.style.top = `${(item.y / 6) * 100}%`;
-                node.dataset.index = index;
-
-                node.addEventListener("mousedown", (e) => { if (e.button === 0) { isDragging = true; currentDrag = node; } });
-                node.addEventListener("contextmenu", (e) => { e.preventDefault(); if(confirm("Xóa thiết bị này?")) node.remove(); });
-                mapArea.appendChild(node);
-            });
-        }
-
-        document.addEventListener("mousemove", (e) => {
-            if (isDragging && currentDrag) {
-                const rect = document.getElementById("map-area").getBoundingClientRect();
-                let x = Math.max(0, Math.min(e.clientX - rect.left, rect.width));
-                let y = Math.max(0, Math.min(e.clientY - rect.top, rect.height));
-                currentDrag.style.left = `${(x / rect.width) * 100}%`;
-                currentDrag.style.top = `${(y / rect.height) * 100}%`;
-            }
-        });
-
-        document.addEventListener("mouseup", () => { isDragging = false; currentDrag = null; });
-
-        function saveAndSend() {
-            const mapArea = document.getElementById("map-area");
-            const btn = document.getElementById("btn-save");
-            btn.innerText = "⏳ Đang chụp màn hình...";
-            
-            let finalCounts = {};
-            document.querySelectorAll('.icon-node').forEach(node => {
-                let key = itemsData[node.dataset.index].key;
-                finalCounts[key] = (finalCounts[key] || 0) + 1;
-            });
-
-            html2canvas(mapArea, { useCORS: true, scale: 2 }).then(canvas => {
-                Streamlit.setComponentValue({ status: "approved", final_image_b64: canvas.toDataURL("image/png"), final_counts: finalCounts });
-                btn.innerText = "✅ Đã gửi! Vui lòng bấm Xuất File trên web.";
-                btn.classList.remove('btn-success');
-            });
-        }
-
-        Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onDataFromPython);
-        Streamlit.setComponentReady();
-        initComponent();
-    </script>
-</body>
-</html>
-"""
-
-@st.cache_resource
-def get_interactive_map_component():
-    """Tạo component 1 lần duy nhất trong RAM để tránh mọi lỗi load file"""
-    component_dir = os.path.join(tempfile.gettempdir(), "mep_map_v6")
-    os.makedirs(component_dir, exist_ok=True)
-    index_path = os.path.join(component_dir, "index.html")
-    with open(index_path, "w", encoding="utf-8") as f:
-        f.write(COMPONENT_HTML)
-    return components.declare_component("interactive_map", path=component_dir)
-
-interactive_map_component = get_interactive_map_component()
+parent_dir = os.path.dirname(os.path.abspath(__file__))
+build_dir = os.path.join(parent_dir, "map_component")
+interactive_map_component = components.declare_component("interactive_map", path=build_dir)
 
 # ====================================================================================
 # 1. CẤU HÌNH MẶC ĐỊNH
@@ -225,7 +112,7 @@ def regex_extract_quantities(text: str, labels: list) -> dict:
     return found
 
 # ====================================================================================
-# 3. AI PROVIDER (SMART CROPPING - CẮT TOP VIEW)
+# 3. AI PROVIDER (BẪY LỖI KHI CẮT ẢNH JSON)
 # ====================================================================================
 class AIProvider:
     def __init__(self, api_key: str, model: str):
@@ -235,25 +122,16 @@ class AIProvider:
         self.model = model
 
     def analyze_slide_image(self, image: Image.Image) -> dict:
-        system_prompt = """Bạn là chuyên gia phân tích bản vẽ PDF. 
-Trang PDF này có thể chứa một hoặc nhiều góc nhìn (Top view, Front view, Right view...) ghép chung.
-
-Tìm các từ khóa như "Booth Dimensions", "Top view" trên ảnh để định vị.
-Trả về ĐÚNG định dạng JSON (không có markdown):
+        system_prompt = """Trang PDF này có thể chứa một hoặc nhiều góc nhìn (Top view, Front view, Right view...) ghép chung.
+Trả về JSON (không có markdown):
 {
     "label": "Booth Location" | "Perspective View" | "Booth Dimensions" | "Other",
     "crop_box": [ymin, xmin, ymax, xmax]
 }
-
 Quy tắc:
-1. Nếu trang LÀ mặt bằng tổng thể toàn khu, trả về label: "Booth Location".
-2. Nếu trang LÀ phối cảnh 3D, trả về label: "Perspective View".
-3. Nếu trang có tiêu đề "Booth Dimensions" HOẶC chứa bản vẽ "Top view" (Mặt bằng 2D nhìn từ trên xuống có lưới tọa độ):
-   - Trả về label: "Booth Dimensions".
-   - Bạn PHẢI khoanh vùng (Bounding Box) cắt RIÊNG phần bản vẽ "Top view" đó ra. Bỏ qua các góc nhìn Front/Left/Right.
-   - Cắt rộng ra một chút để lấy ĐẦY ĐỦ các chữ số tọa độ (0, 1, 2, 3...) ở viền ngoài lưới.
-   - Tọa độ `crop_box` là mảng 4 số nguyên từ 0 đến 1000 (tỷ lệ 0%-100% kích thước ảnh). Ví dụ: [100, 50, 900, 450].
-4. Nếu không thuộc các loại trên, để crop_box là null."""
+- Mặt bằng tổng hội chợ: "Booth Location".
+- Phối cảnh 3D chéo: "Perspective View".
+- Nếu có "Top view" (mặt bằng 2D nhìn từ trên xuống có ô vuông), label là "Booth Dimensions". Khi đó, trả về crop_box là mảng 4 số nguyên 0-1000 để khoanh đúng vùng Top View đó. Nếu không cắt được thì để crop_box là null."""
         
         try:
             response = self.client.models.generate_content(
@@ -261,13 +139,11 @@ Quy tắc:
                 contents=[system_prompt, image]
             )
             text = response.text.strip()
-            # Bắt JSON bằng Regex để tránh lỗi định dạng markdown của Gemini
             match = re.search(r'\{.*\}', text, re.DOTALL)
             if match:
                 return json.loads(match.group(0))
             return {"label": "Other", "crop_box": None}
         except Exception as e:
-            print("AI Vision Error:", e)
             return {"label": "Other", "crop_box": None}
 
 # ====================================================================================
@@ -298,9 +174,9 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
         
         if label == "Booth Dimensions" and classified["Booth Dimensions"] is None:
             crop_box = data.get("crop_box")
+            # Bẫy lỗi: Cắt ảnh nếu AI cung cấp tọa độ. Nếu cắt lỗi, lấy luôn toàn bộ ảnh gốc.
             if crop_box and len(crop_box) == 4:
                 try:
-                    # AI đã chỉ ra tọa độ, ta dùng Pillow để "Cắt" riêng Top View ra
                     ymin, xmin, ymax, xmax = crop_box
                     w, h = img.size
                     left, top = (xmin / 1000.0) * w, (ymin / 1000.0) * h
@@ -316,6 +192,10 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
         elif label == "Perspective View" and classified["Perspective View"] is None:
             classified["Perspective View"] = img
             
+    # Bẫy lỗi: Nếu AI mù tịt không tìm ra Booth Dimensions, lấy bừa trang đầu tiên làm nền
+    if classified["Booth Dimensions"] is None and len(images) > 0:
+        classified["Booth Dimensions"] = images[0]
+
     result.booth_location_img = classified["Booth Location"]
     result.perspective_img = classified["Perspective View"]
     result.dimensions_img = classified["Booth Dimensions"]
@@ -389,11 +269,7 @@ def main():
         st.session_state.result = None
         st.session_state.equipment_table = pd.DataFrame(DEFAULT_EQUIPMENT_CONFIG)
 
-    st.title("⚡ MEP Layout Auto-Generator V6.0 (Smart Crop)")
-    
-    if interactive_map_component is None:
-        st.error("❌ Lỗi hệ thống: Không thể khởi tạo Component Web. Vui lòng liên hệ Admin.")
-        return
+    st.title("⚡ MEP Layout Auto-Generator (Final Cloud Version)")
 
     if st.session_state.step == 1:
         st.info("Bước 1: Cấu hình bảng Legend và Upload file thiết kế (Quotation + 3D Review).")
@@ -424,7 +300,7 @@ def main():
                         st.error(f"❌ Có lỗi xảy ra trong quá trình xử lý AI: {str(e)}")
 
     elif st.session_state.step == 2:
-        st.success("Bước 2: Hệ thống đã tự động cắt bản vẽ Top View! Hãy kéo thả Icon cho đúng vị trí, rồi bấm 'Chốt Bản Đồ & Lưu'.")
+        st.success("Bước 2: Hệ thống đã nạp bản đồ! Hãy kéo Icon đến đúng vị trí rồi nhấn 'Chốt Bản Đồ & Lưu'.")
         
         if st.button("⬅️ Quay lại Bước 1"):
             st.session_state.step = 1
@@ -436,8 +312,6 @@ def main():
             buf = io.BytesIO()
             result.dimensions_img.convert("RGB").save(buf, format="PNG")
             bg_b64 = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
-        else:
-            st.warning("⚠️ AI không tìm thấy hoặc cắt lỗi bản vẽ Top View chuẩn 2D trong file PDF.")
 
         js_items = []
         for eq in result.equipment:
@@ -445,11 +319,15 @@ def main():
             for p in pts:
                 js_items.append({"key": eq.key, "icon_val": eq.icon_value, "color": eq.color_hex, "x": p[0], "y": p[1]})
 
-        component_value = interactive_map_component(
-            bg_base64=bg_b64, 
-            items=js_items, 
-            key="map_interact"
-        )
+        try:
+            component_value = interactive_map_component(
+                bg_base64=bg_b64, 
+                items=js_items, 
+                key="map_interact"
+            )
+        except Exception as e:
+            st.error(f"❌ Lỗi tải Component Bản đồ: {e}. Vui lòng đảm bảo bạn đã tạo file `map_component/index.html` trên thư mục gốc GitHub.")
+            return
 
         if component_value and component_value.get("status") == "approved":
             st.divider()
