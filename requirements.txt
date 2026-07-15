@@ -1,0 +1,7 @@
+streamlit
+anthropic
+pdfplumber
+pandas
+ezdxf
+python-pptx
+streamlit-drawable-canvas
