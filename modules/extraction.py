@@ -1,11 +1,11 @@
 import pdfplumber
-import google.generativeai as genai
+from google import genai
 import json
 import os
 
 def extract_and_align_data(quote_file, review_3d_file):
     """
-    Sử dụng Gemini 1.5 Flash miễn phí để đọc text từ Báo giá & 3D, 
+    Sử dụng Gemini qua SDK mới (google-genai) để đọc text từ Báo giá & 3D, 
     xuất JSON ánh xạ tọa độ.
     """
     # 1. Trích xuất text từ Báo giá
@@ -20,15 +20,13 @@ def extract_and_align_data(quote_file, review_3d_file):
         for page in pdf.pages:
             review_text += page.extract_text() or ""
 
-    # 3. Kết nối API Gemini
+    # 3. Kết nối API Gemini bằng Client mới
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("Không tìm thấy GEMINI_API_KEY trong cấu hình hệ thống!")
 
-    genai.configure(api_key=api_key)
-    
-    # Sử dụng mô hình gemini-1.5-flash (Nhanh và hỗ trợ Free Tier tốt nhất)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    # Khởi tạo Client theo chuẩn thư viện google-genai
+    client = genai.Client(api_key=api_key)
     
     prompt = f"""
     Bạn là một kỹ sư hệ thống MEP. Hãy phân tích tài liệu Báo giá và Thiết kế 3D dưới đây để hạ cánh thiết bị xuống lưới tọa độ 2D (Lưới 6x6 mét).
@@ -51,13 +49,18 @@ def extract_and_align_data(quote_file, review_3d_file):
         "icon": "default.png"
       }}
     ]
+    Lưu ý: Nếu một thiết bị có số lượng > 1, hãy tạo ra các phần tử riêng biệt trong mảng với tọa độ X, Y khác nhau.
     """
 
-    # 4. Gửi yêu cầu và nhận kết quả
-    response = model.generate_content(prompt)
+    # 4. Gửi yêu cầu và nhận kết quả bằng mô hình mới nhất
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt,
+    )
+    
     raw_text = response.text.strip()
     
-    # Xử lý làm sạch chuỗi: Gemini đôi khi tự bọc code trong block markdown ```json ... ```
+    # Xử lý làm sạch chuỗi (loại bỏ markdown block nếu có)
     if raw_text.startswith("```json"):
         raw_text = raw_text[7:]
     elif raw_text.startswith("```"):
