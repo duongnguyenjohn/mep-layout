@@ -1,7 +1,7 @@
 """
 ====================================================================================
  HỆ THỐNG TỰ ĐỘNG BÓC TÁCH & VẼ SƠ ĐỒ ĐIỆN GIAN HÀNG (Electrical Layout Auto-Generator)
- PHIÊN BẢN CHUNG KẾT — Đọc Component Tĩnh Chuẩn Tài Liệu Streamlit
+ PHIÊN BẢN V7.0 PURE PYTHON — Bỏ JS/HTML, Render Tọa độ Trực tiếp bằng Python
 ====================================================================================
 """
 
@@ -11,15 +11,13 @@ import random
 import re
 import json
 import unicodedata
-import base64
 import gc
 from dataclasses import dataclass, field
 from typing import Optional
 
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as components
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 from pypdf import PdfReader
 from pdf2image import convert_from_bytes
 from pptx import Presentation
@@ -32,22 +30,15 @@ except ImportError:
     genai = None
 
 # ====================================================================================
-# 0. NẠP CUSTOM COMPONENT THEO CHUẨN TÀI LIỆU
-# Lấy đường dẫn tuyệt đối của thư mục 'map_component' (phải tồn tại vật lý trên GitHub)
-# ====================================================================================
-parent_dir = os.path.dirname(os.path.abspath(__file__))
-build_dir = os.path.join(parent_dir, "map_component")
-interactive_map_component = components.declare_component("interactive_map", path=build_dir)
-
-# ====================================================================================
 # 1. CẤU HÌNH MẶC ĐỊNH
 # ====================================================================================
 AI_MODEL_DEFAULT = "gemini-1.5-pro"
 STOPWORDS_VI = {"và", "cho", "của", "tại"}
 SLIDE_TYPES = ["Booth Location", "Perspective View", "Booth Dimensions"]
+GRID_METERS = 6.0
 
 DEFAULT_EQUIPMENT_CONFIG = [
-    {"Tên thiết bị": "Đèn Floodlight 50W", "Biểu tượng vẽ": "▲", "Mã màu Hex": "#FFCD00", "Vị trí ưu tiên": "Hệ trần biên", "Công suất": "50W", "Số lượng": 30},
+    {"Tên thiết bị": "Đèn Floodlight 50W", "Biểu tượng vẽ": "▲", "Mã màu Hex": "#FFCD00", "Vị trí ưu tiên": "Hệ trần biên", "Công suất": "50W", "Số lượng": 10},
     {"Tên thiết bị": "Ổ cắm 5A/220V", "Biểu tượng vẽ": "●", "Mã màu Hex": "#D62728", "Vị trí ưu tiên": "Bàn tư vấn", "Công suất": "220V", "Số lượng": 3},
 ]
 
@@ -70,7 +61,12 @@ class PipelineResult:
     booth_location_img: Optional[Image.Image] = None
     perspective_img: Optional[Image.Image] = None
     dimensions_img: Optional[Image.Image] = None
-    coordinates: dict = field(default_factory=dict)
+
+def hex_to_rgb(hex_color: str) -> tuple:
+    try:
+        h = (hex_color or "").strip().lstrip("#")
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+    except: return (128, 128, 128)
 
 def slugify(text: str, idx: int) -> str:
     try:
@@ -112,7 +108,7 @@ def regex_extract_quantities(text: str, labels: list) -> dict:
     return found
 
 # ====================================================================================
-# 3. AI PROVIDER (BẪY LỖI KHI CẮT ẢNH JSON)
+# 3. AI PROVIDER (SMART CROPPING)
 # ====================================================================================
 class AIProvider:
     def __init__(self, api_key: str, model: str):
@@ -122,29 +118,22 @@ class AIProvider:
         self.model = model
 
     def analyze_slide_image(self, image: Image.Image) -> dict:
-        system_prompt = """Trang PDF này có thể chứa một hoặc nhiều góc nhìn (Top view, Front view, Right view...) ghép chung.
-Trả về JSON (không có markdown):
+        system_prompt = """Trang PDF này có thể chứa một hoặc nhiều góc nhìn.
+Trả về JSON:
 {
     "label": "Booth Location" | "Perspective View" | "Booth Dimensions" | "Other",
     "crop_box": [ymin, xmin, ymax, xmax]
 }
 Quy tắc:
-- Mặt bằng tổng hội chợ: "Booth Location".
-- Phối cảnh 3D chéo: "Perspective View".
-- Nếu có "Top view" (mặt bằng 2D nhìn từ trên xuống có ô vuông), label là "Booth Dimensions". Khi đó, trả về crop_box là mảng 4 số nguyên 0-1000 để khoanh đúng vùng Top View đó. Nếu không cắt được thì để crop_box là null."""
-        
+- Tổng mặt bằng khu vực: "Booth Location".
+- Phối cảnh 3D góc chéo: "Perspective View".
+- Nếu có "Top view" (Mặt bằng 2D nhìn thẳng từ trên xuống có lưới), label là "Booth Dimensions". Khi đó, trả về crop_box là mảng 4 số nguyên 0-1000 để cắt vùng Top View. Nếu không cắt được thì để null."""
         try:
-            response = self.client.models.generate_content(
-                model=self.model,
-                contents=[system_prompt, image]
-            )
-            text = response.text.strip()
-            match = re.search(r'\{.*\}', text, re.DOTALL)
-            if match:
-                return json.loads(match.group(0))
+            response = self.client.models.generate_content(model=self.model, contents=[system_prompt, image])
+            match = re.search(r'\{.*\}', response.text.strip(), re.DOTALL)
+            if match: return json.loads(match.group(0))
             return {"label": "Other", "crop_box": None}
-        except Exception as e:
-            return {"label": "Other", "crop_box": None}
+        except: return {"label": "Other", "crop_box": None}
 
 # ====================================================================================
 # 4. RUN AI PROCESSING
@@ -174,7 +163,6 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
         
         if label == "Booth Dimensions" and classified["Booth Dimensions"] is None:
             crop_box = data.get("crop_box")
-            # Bẫy lỗi: Cắt ảnh nếu AI cung cấp tọa độ. Nếu cắt lỗi, lấy luôn toàn bộ ảnh gốc.
             if crop_box and len(crop_box) == 4:
                 try:
                     ymin, xmin, ymax, xmax = crop_box
@@ -182,17 +170,14 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
                     left, top = (xmin / 1000.0) * w, (ymin / 1000.0) * h
                     right, bottom = (xmax / 1000.0) * w, (ymax / 1000.0) * h
                     classified["Booth Dimensions"] = img.crop((left, top, right, bottom))
-                except Exception:
-                    classified["Booth Dimensions"] = img
-            else:
-                classified["Booth Dimensions"] = img
+                except: classified["Booth Dimensions"] = img
+            else: classified["Booth Dimensions"] = img
                 
         elif label == "Booth Location" and classified["Booth Location"] is None:
             classified["Booth Location"] = img
         elif label == "Perspective View" and classified["Perspective View"] is None:
             classified["Perspective View"] = img
             
-    # Bẫy lỗi: Nếu AI mù tịt không tìm ra Booth Dimensions, lấy bừa trang đầu tiên làm nền
     if classified["Booth Dimensions"] is None and len(images) > 0:
         classified["Booth Dimensions"] = images[0]
 
@@ -200,20 +185,66 @@ def run_ai_processing(quotation_file, review_file, table_rows: list, ai: AIProvi
     result.perspective_img = classified["Perspective View"]
     result.dimensions_img = classified["Booth Dimensions"]
     
-    coords = {}
-    for it in result.equipment:
-        coords[it.key] = [[round(random.uniform(1.0, 5.0), 2), round(random.uniform(1.0, 5.0), 2)] for _ in range(it.quantity)]
-    result.coordinates = coords
-    
     del images
     gc.collect()
-    
     return result
 
 # ====================================================================================
-# 5. HÀM TẠO PPTX
+# 5. PYTHON NATIVE RENDER (VẼ TRỰC TIẾP LÊN ẢNH BẰNG PILLOW MÀ KHÔNG CẦN JS)
 # ====================================================================================
-def export_final_pptx(result: PipelineResult, final_b64_image: str, final_counts: dict) -> bytes:
+def render_mep_map_python(bg_img: Image.Image, coords_df: pd.DataFrame) -> Image.Image:
+    """Vẽ lưới 6x6m và đặt các icon lên ảnh nền bằng thư viện Pillow (Python)."""
+    if bg_img is None: return None
+    
+    img = bg_img.copy().convert("RGBA")
+    draw = ImageDraw.Draw(img)
+    w, h = img.size
+
+    # Vẽ lưới mờ 6x6m
+    for i in range(1, int(GRID_METERS)):
+        x = int((i / GRID_METERS) * w)
+        y = int((i / GRID_METERS) * h)
+        draw.line([(x, 0), (x, h)], fill=(0, 80, 136, 100), width=1)
+        draw.line([(0, y), (w, y)], fill=(0, 80, 136, 100), width=1)
+
+    # Thử load Font hệ thống, nếu không có dùng font mặc định
+    try:
+        font = ImageFont.truetype("arial.ttf", max(14, int(w*0.02)))
+    except:
+        font = ImageFont.load_default()
+
+    # Duyệt qua bảng tọa độ để vẽ đè Icon
+    for _, row in coords_df.iterrows():
+        try:
+            x_m = float(row["Trục X (m)"])
+            y_m = float(row["Trục Y (m)"])
+            
+            # Chỉ vẽ nếu tọa độ hợp lệ
+            if pd.isna(x_m) or pd.isna(y_m): continue
+            
+            px = int((x_m / GRID_METERS) * w)
+            py = int((y_m / GRID_METERS) * h)
+            
+            color_rgb = hex_to_rgb(str(row["Màu Hex"]))
+            icon_char = str(row["Ký Hiệu"])
+            
+            # Vẽ nền tròn cho Icon
+            r = int(w * 0.015)
+            draw.ellipse([px-r, py-r, px+r, py+r], fill=color_rgb, outline=(255,255,255), width=2)
+            
+            # Căn giữa chữ
+            bbox = draw.textbbox((0, 0), icon_char, font=font)
+            tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            draw.text((px - tw/2, py - th/2 - 2), icon_char, fill=(0,0,0), font=font)
+        except Exception:
+            continue
+
+    return img.convert("RGB")
+
+# ====================================================================================
+# 6. HÀM TẠO PPTX
+# ====================================================================================
+def export_final_pptx(result: PipelineResult, final_drawn_img: Image.Image, legend_df: pd.DataFrame) -> bytes:
     prs = Presentation()
     prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
     blank = prs.slide_layouts[6]
@@ -227,19 +258,23 @@ def export_final_pptx(result: PipelineResult, final_b64_image: str, final_counts
         img_obj.convert("RGB").save(buf, format="PNG")
         slide.shapes.add_picture(buf, left, top, width=pic_w, height=pic_h)
 
+    # Slide 1, 2, 3
     for img in [result.booth_location_img, result.perspective_img, result.dimensions_img]:
         s = prs.slides.add_slide(blank)
         if img: add_img(s, img)
 
+    # Slide 4: Ảnh đã được vẽ bằng Python
     s4 = prs.slides.add_slide(blank)
-    if final_b64_image:
-        header, encoded = final_b64_image.split(",", 1)
-        final_img = Image.open(io.BytesIO(base64.b64decode(encoded)))
-        add_img(s4, final_img)
+    if final_drawn_img:
+        add_img(s4, final_drawn_img)
 
+        # Tạo bảng Legend
+        # Lọc danh sách thiết bị có số lượng > 0
+        qty_counts = legend_df["Thiết Bị"].value_counts().to_dict()
+        
         rows = []
         for eq in result.equipment:
-            qty = final_counts.get(eq.key, 0)
+            qty = qty_counts.get(eq.label, 0)
             if qty > 0:
                 rows.append((eq.label, eq.icon_value, eq.color_hex, str(qty)))
         
@@ -252,27 +287,29 @@ def export_final_pptx(result: PipelineResult, final_b64_image: str, final_counts
                 table_shape.table.cell(r, 1).text = sym
                 table_shape.table.cell(r, 3).text = qt
                 table_shape.table.cell(r, 2).fill.solid()
-                table_shape.table.cell(r, 2).fill.fore_color.rgb = RGBColor(*[int(col.strip('#')[i:i+2], 16) for i in (0, 2, 4)])
+                table_shape.table.cell(r, 2).fill.fore_color.rgb = RGBColor(*hex_to_rgb(col))
 
     out = io.BytesIO()
     prs.save(out)
     return out.getvalue()
 
 # ====================================================================================
-# 6. GIAO DIỆN CHÍNH
+# 7. GIAO DIỆN CHÍNH (NATIVE STREAMLIT WORKFLOW)
 # ====================================================================================
 def main():
-    st.set_page_config(page_title="MEP Layout Auto", page_icon="⚡", layout="wide")
+    st.set_page_config(page_title="MEP Layout Auto V7.0", page_icon="⚡", layout="wide")
     
     if "step" not in st.session_state:
         st.session_state.step = 1
         st.session_state.result = None
         st.session_state.equipment_table = pd.DataFrame(DEFAULT_EQUIPMENT_CONFIG)
+        st.session_state.coords_df = pd.DataFrame()
 
-    st.title("⚡ MEP Layout Auto-Generator (Final Cloud Version)")
+    st.title("⚡ MEP Layout Auto-Generator V7.0 (Python Native 100%)")
 
+    # ---------------- BƯỚC 1 ----------------
     if st.session_state.step == 1:
-        st.info("Bước 1: Cấu hình bảng Legend và Upload file thiết kế (Quotation + 3D Review).")
+        st.info("Bước 1: Cấu hình thiết bị và Upload file (Bản này KHÔNG sử dụng Javascript, 100% không lỗi Cloud).")
         c1, c2 = st.columns([1, 1])
         with c1:
             edited_df = st.data_editor(st.session_state.equipment_table, num_rows="dynamic", use_container_width=True)
@@ -284,67 +321,85 @@ def main():
             q_file = st.file_uploader("File Báo Giá (PDF/Excel)")
             r_file = st.file_uploader("File 3D Review (PDF)")
             
-            if st.button("🚀 Xử Lý AI Khởi Tạo Bản Đồ"):
-                if not st.session_state.api_key: 
-                    st.error("⚠️ Vui lòng nhập API Key!")
-                elif not q_file or not r_file: 
-                    st.error("⚠️ Vui lòng upload đầy đủ 2 file!")
+            if st.button("🚀 Xử Lý Khởi Tạo Sơ Đồ"):
+                if not st.session_state.api_key: st.error("⚠️ Vui lòng nhập API Key!")
+                elif not q_file or not r_file: st.error("⚠️ Vui lòng upload đầy đủ 2 file!")
                 else:
                     try:
                         ai = AIProvider(st.session_state.api_key, st.session_state.model_choice)
-                        with st.spinner("AI đang tìm và tự động cắt bản vẽ Top View..."):
-                            st.session_state.result = run_ai_processing(q_file, r_file, edited_df.to_dict("records"), ai)
+                        with st.spinner("AI đang bóc tách thiết bị và xử lý ảnh..."):
+                            res = run_ai_processing(q_file, r_file, edited_df.to_dict("records"), ai)
+                            st.session_state.result = res
+                            
+                            # Khởi tạo bảng danh sách từng cá thể thiết bị
+                            initial_coords = []
+                            for eq in res.equipment:
+                                for i in range(eq.quantity):
+                                    initial_coords.append({
+                                        "Thiết Bị": eq.label,
+                                        "Ký Hiệu": eq.icon_value,
+                                        "Màu Hex": eq.color_hex,
+                                        "Trục X (m)": round(random.uniform(1.0, 5.0), 1),
+                                        "Trục Y (m)": round(random.uniform(1.0, 5.0), 1)
+                                    })
+                            st.session_state.coords_df = pd.DataFrame(initial_coords)
                             st.session_state.step = 2
                             st.rerun()
                     except Exception as e:
-                        st.error(f"❌ Có lỗi xảy ra trong quá trình xử lý AI: {str(e)}")
+                        st.error(f"❌ Có lỗi xảy ra: {str(e)}")
 
+    # ---------------- BƯỚC 2 ----------------
     elif st.session_state.step == 2:
-        st.success("Bước 2: Hệ thống đã nạp bản đồ! Hãy kéo Icon đến đúng vị trí rồi nhấn 'Chốt Bản Đồ & Lưu'.")
+        st.success("Bước 2: Thay đổi tọa độ X, Y (0m - 6m) hoặc thêm/xóa thiết bị trong bảng bên phải. Bản đồ sẽ tự cập nhật ngay lập tức!")
         
         if st.button("⬅️ Quay lại Bước 1"):
             st.session_state.step = 1
             st.rerun()
 
-        result = st.session_state.result
-        bg_b64 = ""
-        if result.dimensions_img:
-            buf = io.BytesIO()
-            result.dimensions_img.convert("RGB").save(buf, format="PNG")
-            bg_b64 = f"data:image/png;base64,{base64.b64encode(buf.getvalue()).decode('utf-8')}"
+        res = st.session_state.result
+        if not res.dimensions_img:
+            st.warning("⚠️ Không tìm thấy ảnh Top View.")
+            st.stop()
 
-        js_items = []
-        for eq in result.equipment:
-            pts = result.coordinates.get(eq.key, [])
-            for p in pts:
-                js_items.append({"key": eq.key, "icon_val": eq.icon_value, "color": eq.color_hex, "x": p[0], "y": p[1]})
-
-        try:
-            component_value = interactive_map_component(
-                bg_base64=bg_b64, 
-                items=js_items, 
-                key="map_interact"
-            )
-        except Exception as e:
-            st.error(f"❌ Lỗi tải Component Bản đồ: {e}. Vui lòng đảm bảo bạn đã tạo file `map_component/index.html` trên thư mục gốc GitHub.")
-            return
-
-        if component_value and component_value.get("status") == "approved":
-            st.divider()
-            st.header("📥 BƯỚC CUỐI: Duyệt & Xuất File PPTX")
+        col_img, col_data = st.columns([1.5, 1])
+        
+        with col_data:
+            st.markdown("### 🛠 Bảng Tọa Độ (X, Y)")
+            st.caption("Mẹo: Nhấn vào cột 'Trục X (m)' hoặc 'Trục Y (m)' để gõ số mới. Bạn cũng có thể thêm hàng trống bên dưới cùng để tăng số lượng.")
             
-            final_b64 = component_value.get("final_image_b64")
-            final_counts = component_value.get("final_counts", {})
-
-            pptx_bytes = export_final_pptx(result, final_b64, final_counts)
-            
-            st.download_button(
-                label="🎉 TẢI XUỐNG FILE MEP LAYOUT (.PPTX)",
-                data=pptx_bytes,
-                file_name="MEP_Layout_Final.pptx",
-                mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
-                type="primary"
+            # Data Editor thay thế hoàn toàn việc kéo thả JS
+            new_coords_df = st.data_editor(
+                st.session_state.coords_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                height=600,
+                column_config={
+                    "Trục X (m)": st.column_config.NumberColumn(min_value=0.0, max_value=6.0, step=0.1),
+                    "Trục Y (m)": st.column_config.NumberColumn(min_value=0.0, max_value=6.0, step=0.1),
+                }
             )
+            # Cập nhật State
+            st.session_state.coords_df = new_coords_df
+
+        with col_img:
+            st.markdown("### 🗺️ Bản Đồ Xem Trước")
+            # Python vẽ lại hình ảnh dựa trên dữ liệu từ Data Editor
+            final_drawn_map = render_mep_map_python(res.dimensions_img, new_coords_df)
+            st.image(final_drawn_map, use_container_width=True)
+
+        st.divider()
+        st.header("📥 BƯỚC CUỐI: Chốt Bản Vẽ & Xuất File")
+        st.info("Bảng Legend trên Slide 4 sẽ tự động tổng hợp đếm số lượng dựa trên những thiết bị hiện có trong Bảng Tọa Độ ở trên.")
+        
+        pptx_bytes = export_final_pptx(res, final_drawn_map, new_coords_df)
+        st.download_button(
+            label="🎉 TẢI XUỐNG FILE PPTX HOÀN CHỈNH",
+            data=pptx_bytes,
+            file_name="MEP_Layout_Final_V7.pptx",
+            mime="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            type="primary"
+        )
 
 if __name__ == "__main__":
     main()
+ 
